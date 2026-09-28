@@ -190,6 +190,10 @@ TEST(RailMonitorCrossNumaTest, CrossNumaPrefersSameNameDevice) {
     // local mlx5_x (idx0, NUMA 0) reaching remote NUMA-1 domain: same-name
     // remote mlx5_x is at idx1. Must map there, not positionally to idx0.
     EXPECT_EQ(rail.findBestRemoteDevice(/*local_nic=*/0, /*remote_numa=*/1), 1);
+
+    // direct_rails_ pairs by name across all remote NICs, ignoring NUMA.
+    EXPECT_EQ(rail.directRemoteDevice(/*local_nic=*/0), 1);
+    EXPECT_EQ(rail.directRemoteDevice(/*local_nic=*/1), 0);
 }
 
 // ---------------------------------------------------------------------------

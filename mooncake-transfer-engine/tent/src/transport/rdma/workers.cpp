@@ -112,6 +112,12 @@ Workers::Workers(RdmaTransport* transport)
 
     params.strict_local_numa =
         conf->get("transports/rdma/strict_local_numa", false);
+    dest_device_affinity_ =
+        conf->get("transports/rdma/dest_device_affinity", false);
+    if (dest_device_affinity_) {
+        LOG(INFO) << "RDMA dest device affinity enabled: remote NIC follows "
+                     "the same-name direct rail";
+    }
 
     // ============================================================
     // Bandwidth Estimation (EWMA)
@@ -1555,7 +1561,17 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
         rail.load(std::shared_ptr<const Topology>(source.pin, source.topo),
                   std::shared_ptr<const Topology>(target.pin, target.topo),
                   rail_topo_json_, transport_->conf_.get());
-    if (slice->target_dev_id < 0) {
+    // Use the same-name direct rail and skip the memory-tier check. Without
+    // a same-name peer, keep the existing selection path.
+    bool affinity_pinned = false;
+    if (dest_device_affinity_) {
+        int direct = rail.directRemoteDevice(slice->source_dev_id);
+        if (direct >= 0) {
+            slice->target_dev_id = direct;
+            affinity_pinned = true;
+        }
+    }
+    if (!affinity_pinned && slice->target_dev_id < 0) {
         int mapped_dev_id = rail.findBestRemoteDevice(
             slice->source_dev_id, target.topo_entry->numa_node);
         for (size_t rank = 0; rank < Topology::DevicePriorityRanks - 1;
@@ -1635,6 +1651,11 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
             << "Optimal device pair not available: source_dev_id "
             << slice->source_dev_id << ", target_dev_id "
             << slice->target_dev_id;
+        // Stay on the pinned NIC instead of falling back to another rail.
+        if (affinity_pinned) {
+            return Status::DeviceNotFound(
+                "Same-name remote NIC is not available" LOC_MARK);
+        }
         return selectFallbackDevice(source, target, slice);
     }
 
@@ -1772,7 +1793,9 @@ Status Workers::generatePostPath(RdmaSlice* slice) {
     CHECK_STATUS(getRouteHint(target, target_id, (uint64_t)slice->target_addr,
                               slice->length));
 
-    if (slice->retry_count == 0)
+    // With affinity, retries stay on the same-name NIC. Otherwise only the
+    // first attempt uses the optimal path.
+    if (slice->retry_count == 0 || dest_device_affinity_)
         CHECK_STATUS(selectOptimalDevice(source, target, slice));
     else
         CHECK_STATUS(selectFallbackDevice(source, target, slice));
